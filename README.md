@@ -33,17 +33,34 @@ make bench   # go test -bench=. -benchmem ./...
 | 1-1 | RESP2 파서 (부분 수신 처리, 프로토콜 에러 구분) | ✅ 완료 |
 | 1-2 | RESP writer (parser와 round-trip 검증) | ✅ 완료 |
 | 1-3 | TCP 서버 (conn당 goroutine) + 단일 executor | ✅ 완료 |
-| 1-4 ~ 1-5 | command table / dispatcher, in-memory store | ⏭️ 다음 작업 |
+| 1-4 ~ 1-5 | command table / dispatcher, in-memory store | ✅ 완료 |
 | 2 ~ 7 | 자료구조, TTL, RDB/AOF, 심화 기능, event loop 교체, 인코딩 최적화 | ⏳ 예정 |
+
+### Phase 1 완료 기준 검증 결과 (2026-11-01, redis-server 8.10.3 대조)
+
+- `redis-cli -p <port>`로 `SET k v` → `GET k` 동작.
+- 같은 명령 25개를 우리 서버와 실제 `redis-server`에 보내 응답 비교: **23개 일치, 2개 차이**(아래 "실제 Redis와의 차이").
+- `redis-benchmark -t set,get -q -n 200000` 에러 없이 완주 (`-P 16` 포함). 단일 실행 수치이며 반복 측정은 아님:
+
+  | 조건 | 우리 서버 (GET) | 실제 Redis (GET) | 비율 |
+  |------|----------------|------------------|------|
+  | 기본 (c=50, P=1) | 약 15.9만 rps | 약 21.2만 rps | 약 75% |
+  | `-P 16` | 약 87.7만 rps | 약 263만 rps | 약 33% |
+
+  파이프라인 이득이 우리는 약 5.5배, Redis는 약 12배다. 명령마다 연결 goroutine ↔ executor 전환이 2번 일어나기 때문이라고 **추정**하지만 프로파일링은 하지 않았다(⚠️ 확인 필요, Phase 5-1).
+
+### 실제 Redis와의 차이
+
+- `SET key value`만 지원한다. `EX`/`PX`/`NX`/`XX` 옵션이 붙으면 Redis는 `-ERR syntax error`지만 우리는 `-ERR wrong number of arguments`다 (Phase 3에서 해소).
+- 알 수 없는 명령의 에러 메시지는 Redis와 같은 형식이다(인자가 없으면 `, with args beginning with:` 생략, 에코하는 입력은 128바이트 제한).
 
 ### 다음에 이어서 할 작업
 
-**1-4 command table / dispatcher** (`PING`, `ECHO`, `GET`, `SET`, `DEL`, `EXISTS`, 알 수 없는 명령은 `-ERR unknown command`)
+**Phase 2-1 String 보강** (`INCR/DECR/APPEND/MGET/MSET/SETNX`, 정수 오버플로 에러 테스트)
 
-- **소견**: 1-5(in-memory `map[string]*Object`)와 **같이 진행**하는 것을 권장한다. `GET`/`SET`/`DEL`/`EXISTS`는 store 없이는 의미 있는 테스트를 쓸 수 없고, dispatcher가 store 인터페이스를 어떻게 쓰는지가 함께 정해져야 하기 때문이다.
-- **완료 기준**: `redis-cli`로 `SET k v` → `GET k` 동작, `redis-benchmark -t set,get -q` 에러 없이 완주 (이 시점에 `brew install redis`로 클라이언트 도구 설치 필요).
-- **결정 완료**: `Handler` panic은 executor에서 `recover` 후 `-ERR internal error`로 응답하고 서버는 유지한다(스택은 로그). 에러/Simple String의 CR/LF는 writer가 공백으로 치환한다.
-- **⚠️ panic 복구의 한계**: 명령이 store를 일부만 바꾼 채 panic하면 상태가 불일치할 수 있다. 1-4/1-5에서 "검증 후 변경" 순서로 작성해 완화한다.
+- **⚠️ 불변식 주의**: `store.Object.Str`은 제자리 수정 금지(교체만 허용). `GET` 응답이 같은 바이트를 연결 goroutine과 공유하므로, `APPEND` 등을 제자리 수정으로 구현하면 data race다. 새 슬라이스를 만들어 교체한다.
+- 명령은 "검증을 모두 끝낸 뒤 변경" 순서로 작성한다(panic 복구의 일관성 한계 완화).
+- `WRONGTYPE` 처리는 두 번째 타입(List 등)이 생기는 2-2에서 도입한다.
 
 ### 구현 메모
 
