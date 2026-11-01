@@ -11,6 +11,9 @@ const (
 	maxBulkLen  = 512 * 1024 * 1024 // Redis proto-max-bulk-len 기본값
 	maxArrayLen = 1024 * 1024       // Redis multibulk 상한과 동일
 	maxPrealloc = 1024              // 악의적 길이 헤더로 인한 과대 할당 방지
+
+	// 재귀 파싱의 스택 고갈 방지. 초과 시 recover 불가능한 fatal error 로 프로세스가 죽는다.
+	maxNestingDepth = 32
 )
 
 // Kind is the RESP2 data type of a Value.
@@ -54,6 +57,11 @@ func protoErrf(format string, args ...any) error {
 // bytes consumed. If buf does not yet hold a whole message it returns
 // ErrIncomplete and consumed 0, so the caller keeps buf untouched.
 func Parse(buf []byte) (Value, int, error) {
+	return parse(buf, 0)
+}
+
+// parse is Parse with the array nesting depth of buf's message, 0 at top level.
+func parse(buf []byte, depth int) (Value, int, error) {
 	if len(buf) == 0 {
 		return Value{}, 0, ErrIncomplete
 	}
@@ -82,7 +90,7 @@ func Parse(buf []byte) (Value, int, error) {
 	case BulkString:
 		return parseBulk(buf, line, next)
 	default:
-		return parseArray(buf, line, next)
+		return parseArray(buf, line, next, depth)
 	}
 }
 
@@ -113,7 +121,10 @@ func parseBulk(buf, header []byte, next int) (Value, int, error) {
 	return Value{Kind: BulkString, Str: append([]byte{}, buf[next:end]...)}, end + 2, nil
 }
 
-func parseArray(buf, header []byte, next int) (Value, int, error) {
+func parseArray(buf, header []byte, next, depth int) (Value, int, error) {
+	if depth >= maxNestingDepth {
+		return Value{}, 0, protoErrf("arrays nested deeper than %d", maxNestingDepth)
+	}
 	n, err := strconv.ParseInt(string(header), 10, 64)
 	if err != nil || n < -1 || n > maxArrayLen {
 		return Value{}, 0, protoErrf("invalid array length %q", header)
@@ -123,7 +134,7 @@ func parseArray(buf, header []byte, next int) (Value, int, error) {
 	}
 	elems := make([]Value, 0, min(int(n), maxPrealloc))
 	for i := int64(0); i < n; i++ {
-		elem, used, err := Parse(buf[next:])
+		elem, used, err := parse(buf[next:], depth+1)
 		if err != nil {
 			return Value{}, 0, err
 		}

@@ -2,13 +2,23 @@ package network
 
 import (
 	"errors"
+	"log"
 	"net"
+	"runtime/debug"
 	"sync"
 
 	"redis-from-scratch/internal/protocol"
 )
 
-const readSize = 16 * 1024
+const (
+	readSize = 16 * 1024
+
+	// defaultQueryLimit는 Redis client-query-buffer-limit 기본값(1GB)과 같다.
+	defaultQueryLimit = 1 << 30
+
+	// idleQueryCap보다 큰 query buffer는 내용이 거의 비면 반납한다.
+	idleQueryCap = 64 * 1024
+)
 
 // Handler executes one parsed command. The server calls it from a single
 // executor goroutine only, so implementations need no locking.
@@ -25,8 +35,9 @@ type request struct {
 // parsing, and runs every command on one executor goroutine, like Redis's
 // single-threaded command execution.
 type Server struct {
-	handler Handler
-	reqs    chan request
+	handler    Handler
+	reqs       chan request
+	queryLimit int // 연결당 미완성 query buffer 상한(바이트)
 
 	// connections
 	execDone chan struct{}
@@ -41,11 +52,16 @@ type Server struct {
 
 // New creates a Server and starts its executor. Close must be called to stop it.
 func New(h Handler) *Server {
+	return newServer(h, defaultQueryLimit)
+}
+
+func newServer(h Handler, queryLimit int) *Server {
 	s := &Server{
-		handler:  h,
-		reqs:     make(chan request),
-		execDone: make(chan struct{}),
-		active:   make(map[net.Conn]struct{}),
+		handler:    h,
+		reqs:       make(chan request),
+		queryLimit: queryLimit,
+		execDone:   make(chan struct{}),
+		active:     make(map[net.Conn]struct{}),
 	}
 	go s.execute()
 	return s
@@ -54,8 +70,21 @@ func New(h Handler) *Server {
 func (s *Server) execute() {
 	defer close(s.execDone)
 	for r := range s.reqs {
-		r.reply <- s.handler.Handle(r.args)
+		r.reply <- s.handle(r.args)
 	}
+}
+
+// handle runs the handler and turns a panic into an error reply. If the
+// executor died instead, connection goroutines would block on their reply
+// channel forever and Close could never return.
+func (s *Server) handle(args [][]byte) (reply protocol.Value) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("panic in handler: %v\n%s", r, debug.Stack())
+			reply = errorReply("internal error")
+		}
+	}()
+	return s.handler.Handle(args)
 }
 
 // Serve accepts connections on ln until Close is called, then returns nil.
@@ -167,18 +196,36 @@ func (s *Server) handleConn(conn net.Conn) {
 			out = protocol.Append(out, <-replyCh)
 		}
 
+		// 완결된 명령은 이미 처리했으므로, 상한은 아직 미완성으로 남은 부분에만 적용한다.
+		if len(query)-consumed > s.queryLimit {
+			out = protocol.Append(out, errorReply("Protocol error: query buffer limit exceeded"))
+			conn.Write(out)
+			return
+		}
+
 		if len(out) > 0 {
 			if _, err := conn.Write(out); err != nil {
 				return
 			}
 			out = out[:0]
 		}
-		query = append(query[:0], query[consumed:]...)
+		query = compactQuery(query, consumed)
 
 		if readErr != nil {
 			return
 		}
 	}
+}
+
+// compactQuery는 query에서 처리가 끝난 앞 consumed 바이트를 버리고 남은 부분을 반환한다.
+// append(query[:0], ...)는 길이만 줄이고 cap은 유지하므로, 큰 명령을 한 번 받은 연결이
+// 메모리를 계속 쥐게 된다. 큰 버퍼가 거의 비었으면 새 슬라이스로 옮겨 원본을 GC에 돌려준다.
+func compactQuery(query []byte, consumed int) []byte {
+	rest := query[consumed:]
+	if cap(query) > idleQueryCap && len(rest) <= cap(query)/4 {
+		return append([]byte(nil), rest...)
+	}
+	return append(query[:0], rest...)
 }
 
 func errorReply(msg string) protocol.Value {

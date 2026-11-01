@@ -6,13 +6,19 @@ import "strconv"
 // slice. Writing into a caller-owned buffer lets a client batch several
 // replies (pipeline) and flush them with a single write.
 //
-// SimpleString and Error must not contain CR or LF; the caller is responsible
-// for that, as the writer does not escape them.
+// SimpleString and Error are line-based, so any CR or LF in Str is replaced
+// with a space; otherwise a message built from user input could split into
+// several replies and corrupt the stream.
 func Append(dst []byte, v Value) []byte {
 	switch v.Kind {
 	case SimpleString, Error:
 		dst = append(dst, byte(v.Kind))
-		dst = append(dst, v.Str...)
+		for _, b := range v.Str {
+			if b == '\r' || b == '\n' {
+				b = ' '
+			}
+			dst = append(dst, b)
+		}
 		return append(dst, '\r', '\n')
 	case Integer:
 		dst = append(dst, ':')

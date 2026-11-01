@@ -39,6 +39,33 @@ func TestAppend_Bytes(t *testing.T) {
 	}
 }
 
+// CR/LF 가 섞인 문자열이 그대로 나가면 한 응답이 여러 개로 쪼개져 응답 스트림이 깨진다
+// (예: 사용자 입력이 에러 메시지에 들어가는 경우). 줄 기반 타입은 공백으로 치환한다.
+func TestAppend_LineTypesNeverEmbedCRLF(t *testing.T) {
+	tests := []struct {
+		name  string
+		value Value
+		want  string
+	}{
+		{"error with CRLF", Value{Kind: Error, Str: []byte("ERR a\r\n+OK")}, "-ERR a  +OK\r\n"},
+		{"error with lone LF", Value{Kind: Error, Str: []byte("ERR a\nb")}, "-ERR a b\r\n"},
+		{"error with lone CR", Value{Kind: Error, Str: []byte("ERR a\rb")}, "-ERR a b\r\n"},
+		{"simple string with CRLF", Value{Kind: SimpleString, Str: []byte("a\r\nb")}, "+a  b\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Append(nil, tt.value)
+			if string(got) != tt.want {
+				t.Errorf("Append = %q, want %q", got, tt.want)
+			}
+			// 결과는 정확히 하나의 메시지여야 한다.
+			if _, n, err := Parse(got); err != nil || n != len(got) {
+				t.Errorf("Parse(%q): consumed %d of %d, err %v", got, n, len(got), err)
+			}
+		})
+	}
+}
+
 func TestAppend_AppendsToExistingBuffer(t *testing.T) {
 	buf := Append([]byte("+OK\r\n"), Value{Kind: Integer, Int: 1})
 	if got, want := string(buf), "+OK\r\n:1\r\n"; got != want {

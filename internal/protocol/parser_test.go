@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"testing"
@@ -94,6 +95,38 @@ func TestParse_OnlyFirstMessageConsumed(t *testing.T) {
 	got, n, err = Parse(buf[n:])
 	if err != nil || n != 4 || got.Int != 1 {
 		t.Fatalf("second: got %+v consumed %d err %v", got, n, err)
+	}
+}
+
+// 중첩 깊이에 제한이 없으면 "*1\r\n"을 반복하는 입력만으로 재귀가 goroutine 스택 한도를
+// 넘겨 프로세스 전체가 fatal error 로 죽는다(recover 불가).
+func TestParse_NestingDepthLimit(t *testing.T) {
+	nested := func(depth int) []byte {
+		buf := bytes.Repeat([]byte("*1\r\n"), depth-1)
+		return append(buf, "*0\r\n"...)
+	}
+
+	if _, _, err := Parse(nested(maxNestingDepth)); err != nil {
+		t.Fatalf("depth %d: unexpected error: %v", maxNestingDepth, err)
+	}
+
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{"one over the limit", nested(maxNestingDepth + 1)},
+		{"very deep", nested(100_000)},
+		// 끝나지 않은 입력이라도 한도를 넘으면 ErrIncomplete 가 아니라 즉시 에러여야 한다.
+		{"very deep and incomplete", bytes.Repeat([]byte("*1\r\n"), 100_000)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := Parse(tt.input)
+			var pe *ProtocolError
+			if !errors.As(err, &pe) {
+				t.Fatalf("err = %v, want *ProtocolError", err)
+			}
+		})
 	}
 }
 
