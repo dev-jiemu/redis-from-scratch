@@ -1,6 +1,8 @@
 package command
 
 import (
+	"math"
+	"strconv"
 	"strings"
 
 	"redis-from-scratch/internal/protocol"
@@ -34,6 +36,12 @@ var table = map[string]*command{
 	"set":    {"set", 3, set},
 	"del":    {"del", -2, del},
 	"exists": {"exists", -2, exists},
+	"incr":   {"incr", 2, incr},
+	"decr":   {"decr", 2, decr},
+	"append": {"append", 3, cmdAppend},
+	"mget":   {"mget", -2, mget},
+	"mset":   {"mset", -3, mset},
+	"setnx":  {"setnx", 3, setnx},
 }
 
 // Dispatcher looks up a command and runs it against a DB. It implements
@@ -106,6 +114,83 @@ func exists(db *store.DB, args [][]byte) protocol.Value {
 		}
 	}
 	return integer(n)
+}
+
+func incr(db *store.DB, args [][]byte) protocol.Value {
+	return incrBy(db, string(args[1]), 1)
+}
+
+func decr(db *store.DB, args [][]byte) protocol.Value {
+	return incrBy(db, string(args[1]), -1)
+}
+
+func incrBy(db *store.DB, key string, delta int64) protocol.Value {
+	var cur int64
+	if obj, ok := db.Get(key); ok {
+		n, err := strconv.ParseInt(string(obj.Str), 10, 64)
+		if err != nil {
+			return errNotInteger()
+		}
+		cur = n
+	}
+	if (delta > 0 && cur > math.MaxInt64-delta) || (delta < 0 && cur < math.MinInt64-delta) {
+		return errOverflow()
+	}
+	result := cur + delta
+	db.Set(key, store.NewString(strconv.AppendInt(nil, result, 10)))
+	return integer(result)
+}
+
+func cmdAppend(db *store.DB, args [][]byte) protocol.Value {
+	key := string(args[1])
+	var base []byte
+	if obj, ok := db.Get(key); ok {
+		base = obj.Str
+	}
+	newVal := make([]byte, len(base)+len(args[2]))
+	copy(newVal, base)
+	copy(newVal[len(base):], args[2])
+	db.Set(key, store.NewString(newVal))
+	return integer(int64(len(newVal)))
+}
+
+func mget(db *store.DB, args [][]byte) protocol.Value {
+	elems := make([]protocol.Value, len(args)-1)
+	for i, key := range args[1:] {
+		if obj, ok := db.Get(string(key)); ok {
+			elems[i] = bulk(obj.Str)
+		} else {
+			elems[i] = protocol.Value{Kind: protocol.BulkString, Null: true}
+		}
+	}
+	return protocol.Value{Kind: protocol.Array, Array: elems}
+}
+
+func mset(db *store.DB, args [][]byte) protocol.Value {
+	if len(args[1:])%2 != 0 {
+		return wrongArity("mset")
+	}
+	for i := 1; i < len(args); i += 2 {
+		db.Set(string(args[i]), store.NewString(args[i+1]))
+	}
+	return simple("OK")
+}
+
+func setnx(db *store.DB, args [][]byte) protocol.Value {
+	key := string(args[1])
+	if db.Exists(key) {
+		return integer(0)
+	}
+	db.Set(key, store.NewString(args[2]))
+	return integer(1)
+}
+
+func errNotInteger() protocol.Value {
+	return errReply("value is not an integer or out of range")
+}
+
+func errOverflow() protocol.Value {
+	return errReply("increment or decrement would overflow")
 }
 
 func unknownCommand(args [][]byte) protocol.Value {
