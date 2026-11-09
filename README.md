@@ -35,7 +35,8 @@ make bench   # go test -bench=. -benchmem ./...
 | 1-3 | TCP 서버 (conn당 goroutine) + 단일 executor | ✅ 완료 |
 | 1-4 ~ 1-5 | command table / dispatcher, in-memory store | ✅ 완료 |
 | 2-1 | String 보강 (`INCR/DECR/APPEND/MGET/MSET/SETNX`, 정수 오버플로 에러 테스트) | ✅ 완료 |
-| 2-2 ~ 7 | 자료구조, TTL, RDB/AOF, 심화 기능, event loop 교체, 인코딩 최적화 | ⏳ 예정 |
+| 2-2 | List 기초 (`LPUSH/RPUSH/LPOP/RPOP(count 포함)/LLEN/LRANGE`), WRONGTYPE | ✅ 완료 |
+| 2-3 ~ 7 | 자료구조(Hash/Set/ZSet), TTL, RDB/AOF, 심화 기능, event loop 교체, 인코딩 최적화 | ⏳ 예정 |
 
 ### Phase 1 완료 기준 검증 결과 (2026-11-01, redis-server 8.10.3 대조)
 
@@ -55,14 +56,16 @@ make bench   # go test -bench=. -benchmem ./...
 - `SET key value`만 지원한다. `EX`/`PX`/`NX`/`XX` 옵션이 붙으면 Redis는 `-ERR syntax error`지만 우리는 `-ERR wrong number of arguments`다 (Phase 3에서 해소).
 - 알 수 없는 명령의 에러 메시지는 Redis와 같은 형식이다(인자가 없으면 `, with args beginning with:` 생략, 에코하는 입력은 128바이트 제한).
 
+### 2-2 완료 검증 (2026-11-09, redis-server 8.10.3 대조)
+
+- List/String 타입 충돌 포함 49개 명령(음수 인덱스·범위 클램핑·count 경계·WRONGTYPE·arity 에러)을 우리 서버와 실제 `redis-server`에 보내 응답 비교: **전부 일치**.
+- List는 `[][]byte`이며 제자리 수정을 하지 않는다: `LPUSH`는 매번 새 슬라이스(O(n)), `RPUSH`는 `append`, `LPOP`/`RPOP`은 재슬라이싱. 비게 되면 키를 삭제한다.
+- **알려진 제한**: `LPOP` 재슬라이싱은 backing array가 앞쪽 원소를 계속 붙잡는다(메모리 반납 안 됨). 양방향 연결 리스트/quicklist 전환은 Phase 5 이후.
+- `WRONGTYPE`은 `errWrongType()` 하나로 공유한다(`internal/command/dispatcher.go`). `MGET`은 Redis처럼 String이 아닌 키를 nil로 응답한다.
+
 ### 다음에 이어서 할 작업
 
-**Phase 2-2 List 기초** (`LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE`)
-
-- `store.Object`에 `Type` 필드가 이미 있으나 `TypeList`를 추가해야 한다. 내부 표현은 `[][]byte` (doubly-linked list는 Phase 5 이후 최적화).
-- **WRONGTYPE 도입**: String 명령에 List 키를 넣거나 그 반대이면 `-WRONGTYPE Operation against a key holding the wrong kind of value`를 반환한다. 이 에러 반환 함수를 `command` 패키지에 한 번만 만들고 이후 타입에서 공유한다.
-- `LRANGE`의 음수 인덱스(`-1` = 마지막) 처리를 Redis 스펙대로 구현한다.
-- **⚠️ 불변식 유지**: `Object.Str`과 동일하게 List 슬라이스도 제자리 수정 금지. `LPOP`/`RPOP`은 슬라이스 헤드/테일을 교체하는 방식으로 구현한다.
+**Phase 2-3** (구현 계획서 `docs/2026-10-25-redis-implementation-plan.md` 참고). 새 타입 추가 시 타입 검사는 `errWrongType()`을 재사용하고, 비게 된 컬렉션은 키를 삭제한다.
 
 ### 구현 메모
 

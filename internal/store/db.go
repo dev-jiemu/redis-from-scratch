@@ -5,21 +5,30 @@ type Type uint8
 
 const (
 	TypeString Type = iota
+	TypeList
 )
 
-// Object is a value stored under a key (Redis robj). Phase 1 only holds
-// strings; later phases add types and encodings.
+// Object is a value stored under a key (Redis robj). Later phases add more
+// types and encodings.
 type Object struct {
 	Type Type
 	// Str must never be modified in place; replace it with a new slice instead.
 	// A reply shares these bytes with a connection goroutine that copies them
 	// after the executor has moved on, so in-place changes would be a data race.
 	Str []byte // TypeString
+	// List must never be modified in place either; replace it with a new
+	// slice (or a re-slice of the old one) instead. Elements are immutable.
+	List [][]byte // TypeList
 }
 
 // NewString returns a string Object that owns s.
 func NewString(s []byte) *Object {
 	return &Object{Type: TypeString, Str: s}
+}
+
+// NewList returns a list Object that owns items.
+func NewList(items [][]byte) *Object {
+	return &Object{Type: TypeList, List: items}
 }
 
 // DB is the in-memory keyspace. It is not safe for concurrent use: the server

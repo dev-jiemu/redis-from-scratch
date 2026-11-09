@@ -237,3 +237,44 @@ func TestDispatcher_UnknownCommandWithCRLFStaysOneReply(t *testing.T) {
 		t.Errorf("reply %q contains %d CRLF, want exactly 1 (the terminator)", got, strings.Count(got, "\r\n"))
 	}
 }
+
+const wrongTypeReply = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+
+func TestDispatcher_WrongType(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  []string
+		want string
+	}{
+		{"GET on list", []string{"GET", "l"}, wrongTypeReply},
+		{"INCR on list", []string{"INCR", "l"}, wrongTypeReply},
+		{"DECR on list", []string{"DECR", "l"}, wrongTypeReply},
+		{"APPEND on list", []string{"APPEND", "l", "x"}, wrongTypeReply},
+		{"MGET returns null for list", []string{"MGET", "l"}, "*1\r\n$-1\r\n"},
+		{"SETNX on list does not set", []string{"SETNX", "l", "x"}, ":0\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := store.New()
+			db.Set("l", store.NewList([][]byte{[]byte("a")}))
+			if got := run(New(db), tt.cmd...); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+			if obj, _ := db.Get("l"); obj.Type != store.TypeList || len(obj.List) != 1 {
+				t.Errorf("list was modified: %+v", obj)
+			}
+		})
+	}
+}
+
+func TestDispatcher_SetOverwritesAnyType(t *testing.T) {
+	db := store.New()
+	db.Set("l", store.NewList([][]byte{[]byte("a")}))
+	d := New(db)
+	if got := run(d, "SET", "l", "v"); got != "+OK\r\n" {
+		t.Fatalf("SET = %q", got)
+	}
+	if got := run(d, "GET", "l"); got != "$1\r\nv\r\n" {
+		t.Errorf("GET = %q", got)
+	}
+}

@@ -42,6 +42,12 @@ var table = map[string]*command{
 	"mget":   {"mget", -2, mget},
 	"mset":   {"mset", -3, mset},
 	"setnx":  {"setnx", 3, setnx},
+	"lpush":  {"lpush", -3, lpush},
+	"rpush":  {"rpush", -3, rpush},
+	"lpop":   {"lpop", -2, lpop},
+	"rpop":   {"rpop", -2, rpop},
+	"llen":   {"llen", 2, llen},
+	"lrange": {"lrange", 4, lrange},
 }
 
 // Dispatcher looks up a command and runs it against a DB. It implements
@@ -88,6 +94,9 @@ func get(db *store.DB, args [][]byte) protocol.Value {
 	if !ok {
 		return protocol.Value{Kind: protocol.BulkString, Null: true}
 	}
+	if obj.Type != store.TypeString {
+		return errWrongType()
+	}
 	return bulk(obj.Str)
 }
 
@@ -127,6 +136,9 @@ func decr(db *store.DB, args [][]byte) protocol.Value {
 func incrBy(db *store.DB, key string, delta int64) protocol.Value {
 	var cur int64
 	if obj, ok := db.Get(key); ok {
+		if obj.Type != store.TypeString {
+			return errWrongType()
+		}
 		n, err := strconv.ParseInt(string(obj.Str), 10, 64)
 		if err != nil {
 			return errNotInteger()
@@ -145,6 +157,9 @@ func cmdAppend(db *store.DB, args [][]byte) protocol.Value {
 	key := string(args[1])
 	var base []byte
 	if obj, ok := db.Get(key); ok {
+		if obj.Type != store.TypeString {
+			return errWrongType()
+		}
 		base = obj.Str
 	}
 	newVal := make([]byte, len(base)+len(args[2]))
@@ -157,7 +172,8 @@ func cmdAppend(db *store.DB, args [][]byte) protocol.Value {
 func mget(db *store.DB, args [][]byte) protocol.Value {
 	elems := make([]protocol.Value, len(args)-1)
 	for i, key := range args[1:] {
-		if obj, ok := db.Get(string(key)); ok {
+		// Like Redis, MGET replies null for a key that is not a string.
+		if obj, ok := db.Get(string(key)); ok && obj.Type == store.TypeString {
 			elems[i] = bulk(obj.Str)
 		} else {
 			elems[i] = protocol.Value{Kind: protocol.BulkString, Null: true}
@@ -221,6 +237,11 @@ func clip(b []byte, max int) []byte {
 		return b[:max]
 	}
 	return b
+}
+
+// errWrongType is shared by every command that requires a specific type.
+func errWrongType() protocol.Value {
+	return protocol.Value{Kind: protocol.Error, Str: []byte("WRONGTYPE Operation against a key holding the wrong kind of value")}
 }
 
 func errReply(msg string) protocol.Value {
